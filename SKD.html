@@ -12,6 +12,7 @@
       --accent: #3b82f6;
       --success: #22c55e;
       --error: #ef4444;
+      --warning: #f59e0b;
       --border: #334155;
       --font: system-ui, -apple-system, sans-serif;
     }
@@ -104,6 +105,15 @@
     button:hover { filter: brightness(1.1); }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     button.secondary { background: #475569; }
+    button.listening { 
+      background: var(--error); 
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+    }
 
     .input-section { display: none; }
     textarea {
@@ -121,6 +131,17 @@
     }
     textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
 
+    .voice-input-hint {
+      text-align: center;
+      font-size: 0.85rem;
+      color: #94a3b8;
+      margin-bottom: 8px;
+    }
+    .voice-input-hint.recording {
+      color: var(--error);
+      animation: pulse 1.5s infinite;
+    }
+
     .results {
       display: none;
       text-align: center;
@@ -128,8 +149,28 @@
     }
     .score { font-size: 2.5rem; font-weight: bold; margin: 10px 0; }
     .score.high { color: var(--success); }
-    .score.mid { color: #f59e0b; }
+    .score.mid { color: var(--warning); }
     .score.low { color: var(--error); }
+
+    .recommendation {
+      margin: 16px 0;
+      padding: 14px;
+      border-radius: 10px;
+      font-size: 1.15rem;
+      font-weight: 600;
+      line-height: 1.4;
+    }
+    .recommendation.pass {
+      background: rgba(34, 197, 94, 0.12);
+      color: #4ade80;
+      border: 1px solid var(--success);
+    }
+    .recommendation.fail {
+      background: rgba(245, 158, 11, 0.12);
+      color: #fbbf24;
+      border: 1px solid var(--warning);
+    }
+
     .diff {
       background: #0f172a;
       border: 1px solid var(--border);
@@ -143,7 +184,7 @@
     }
     .diff .match { color: var(--success); }
     .diff .missing { color: var(--error); text-decoration: line-through; }
-    .diff .extra { color: #f59e0b; }
+    .diff .extra { color: var(--warning); }
 
     .state-label {
       text-align: center;
@@ -151,11 +192,19 @@
       color: #94a3b8;
       margin-bottom: 8px;
     }
+
+    .browser-warning {
+      color: var(--error);
+      font-size: 0.8rem;
+      text-align: center;
+      margin-top: 8px;
+      display: none;
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>🧠 Тренировка памяти</h1>
+    <h1>Проведи мероприятие </h1>
     <p class="subtitle">Запомните текст за 5 минут и воспроизведите его точно</p>
 
     <div class="people-grid" id="peopleGrid"></div>
@@ -175,12 +224,22 @@
     </div>
 
     <div class="input-section" id="inputSection">
+      <div class="voice-input-hint" id="voiceHint">
+        💡 Нажмите 🎤 чтобы надиктовать текст, или введите вручную
+      </div>
       <textarea id="recallInput" placeholder="Введите текст по памяти..."></textarea>
+      <div class="controls">
+        <button id="micBtn" class="secondary">🎤 Начать запись</button>
+      </div>
+      <div class="browser-warning" id="browserWarning">
+        ⚠️ Ваш браузер не поддерживает распознавание речи. Используйте Chrome, Edge или Safari.
+      </div>
     </div>
 
     <div class="results" id="results">
       <div>Точность воспроизведения:</div>
       <div class="score" id="scoreVal">0%</div>
+      <div id="recommendation" class="recommendation"></div>
       <div class="diff" id="diffBox"></div>
       <button id="playAgain">🔁 Ещё раз</button>
     </div>
@@ -188,7 +247,7 @@
 
   <script>
     // КОНФИГ
-    const GAME_TIME = 5 * 60; // 5 минут в секундах
+    const GAME_TIME = 1 * 60;
     const ORIGINAL_TEXT = `Добрый день. Сегодня мы собрались ,чтобы провести обзор  учебника по литературе.
 В учебнике собраны классические произведения отечественных и зарубежных авторов.
 Каждая глава учебника содержит краткое описание жизни писателя.
@@ -203,14 +262,18 @@
     const inputSection = $('inputSection'), recallInput = $('recallInput');
     const results = $('results'), scoreVal = $('scoreVal'), diffBox = $('diffBox');
     const peopleGrid = $('peopleGrid'), playAgain = $('playAgain');
+    const micBtn = $('micBtn'), voiceHint = $('voiceHint'), browserWarning = $('browserWarning');
+    const recommendation = $('recommendation');
 
     let timerInterval = null;
     let timeLeft = GAME_TIME;
+    let recognition = null;
+    let isListening = false;
 
     // ГЕНЕРАЦИЯ ЛЮДЕЙ
     const PEOPLE = [
       { avatar: '👨‍🔬', name: 'Алексей', role: 'Исследователь' },
-      { avatar: '👩‍🏫', name: 'Мария', role: 'Психолог' },
+      { avatar: '👩‍', name: 'Мария', role: 'Психолог' },
       { avatar: '👨‍💻', name: 'Дмитрий', role: 'Аналитик' },
       { avatar: '👩‍⚕️', name: 'Елена', role: 'Невролог' },
       { avatar: '👨‍🎓', name: 'Игорь', role: 'Студент' },
@@ -226,6 +289,71 @@
       `).join('');
     }
     renderPeople();
+
+    // ИНИЦИАЛИЗАЦИЯ РАСПОЗНАВАНИЯ РЕЧИ
+    function initSpeechRecognition() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      
+      if (!SpeechRecognition) {
+        browserWarning.style.display = 'block';
+        micBtn.disabled = true;
+        micBtn.textContent = '🎤 Не поддерживается';
+        return null;
+      }
+
+      const rec = new SpeechRecognition();
+      rec.lang = 'ru-RU';
+      rec.continuous = true;
+      rec.interimResults = false;
+      rec.maxAlternatives = 1;
+
+      rec.onstart = () => {
+        isListening = true;
+        micBtn.classList.add('listening');
+        micBtn.textContent = '⏹ Остановить запись';
+        voiceHint.textContent = ' Идёт запись... Говорите сейчас';
+        voiceHint.classList.add('recording');
+      };
+
+      rec.onend = () => {
+        isListening = false;
+        micBtn.classList.remove('listening');
+        micBtn.textContent = '🎤 Начать запись';
+        voiceHint.textContent = '💡 Нажмите 🎤 чтобы надиктовать текст, или введите вручную';
+        voiceHint.classList.remove('recording');
+      };
+
+      rec.onresult = (event) => {
+        let finalTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript + ' ';
+          }
+        }
+        if (finalTranscript) {
+          const currentValue = recallInput.value;
+          recallInput.value = currentValue ? `${currentValue} ${finalTranscript.trim()}` : finalTranscript.trim();
+        }
+      };
+
+      rec.onerror = (event) => {
+        if (event.error === 'not-allowed') {
+          alert('Разрешите доступ к микрофону для использования голосового ввода');
+        }
+        stopListening();
+      };
+
+      return rec;
+    }
+
+    function startListening() {
+      if (recognition) recognition.start();
+    }
+
+    function stopListening() {
+      if (recognition) recognition.stop();
+    }
 
     // УТИЛИТЫ
     function formatTime(sec) {
@@ -253,6 +381,8 @@
       submitBtn.style.display = 'none';
       restartBtn.style.display = 'none';
       recallInput.value = '';
+      recommendation.textContent = '';
+      recommendation.className = 'recommendation';
 
       clearInterval(timerInterval);
       timerInterval = setInterval(() => {
@@ -278,6 +408,7 @@
 
     function checkAnswer() {
       clearInterval(timerInterval);
+      stopListening();
       inputSection.style.display = 'none';
       submitBtn.style.display = 'none';
       restartBtn.style.display = 'inline-block';
@@ -287,25 +418,30 @@
       const origWords = normalizeText(ORIGINAL_TEXT);
       const inputWords = normalizeText(recallInput.value);
 
-      // Подсчёт совпадений (учёт порядка не требуется, как в классических тестах на память)
       const origCount = {};
       origWords.forEach(w => origCount[w] = (origCount[w] || 0) + 1);
-      
+
       const inputCount = {};
       inputWords.forEach(w => inputCount[w] = (inputCount[w] || 0) + 1);
 
       let matches = 0;
       for (const w in inputCount) {
-        if (origCount[w]) {
-          matches += Math.min(inputCount[w], origCount[w]);
-        }
+        if (origCount[w]) matches += Math.min(inputCount[w], origCount[w]);
       }
 
       const accuracy = Math.round((matches / origWords.length) * 100);
       scoreVal.textContent = `${accuracy}%`;
       scoreVal.className = `score ${accuracy >= 80 ? 'high' : accuracy >= 50 ? 'mid' : 'low'}`;
 
-      // Визуальная разница (упрощённая)
+      // 🎯 РЕКОМЕНДАЦИЯ
+      if (accuracy >= 50) {
+        recommendation.innerHTML = '🎓 Отличный результат! Рекомендуем поступить на СКД.<br>Более подробно: <a href="https://clck.ru/3Tnu2b" target="_blank" style="color: #60a5fa; text-decoration: underline;">https://clck.ru/3Tnu2b</a>';
+        recommendation.className = 'recommendation pass';
+      } else {
+        recommendation.innerHTML = '💃 Хорошая попытка! Возможно, ваше призвание — танцор.<br>Более подробно: <a href="https://clck.ru/3Tnu2b" target="_blank" style="color: #60a5fa; text-decoration: underline;">https://clck.ru/3Tnu2b</a>';
+        recommendation.className = 'recommendation fail';
+      }
+
       let diffHTML = '';
       const allWords = new Set([...origWords, ...inputWords]);
       allWords.forEach(w => {
@@ -320,6 +456,7 @@
 
     function resetGame() {
       clearInterval(timerInterval);
+      stopListening();
       results.style.display = 'none';
       inputSection.style.display = 'none';
       textBox.classList.remove('hidden');
@@ -329,7 +466,16 @@
       restartBtn.style.display = 'none';
       stateLabel.textContent = 'Нажмите «Начать», чтобы стартовать';
       recallInput.value = '';
+      recommendation.textContent = '';
+      recommendation.className = 'recommendation';
+      voiceHint.textContent = '💡 Нажмите  чтобы надиктовать текст, или введите вручную';
+      voiceHint.classList.remove('recording');
+      micBtn.classList.remove('listening');
+      micBtn.textContent = '🎤 Начать запись';
     }
+
+    // ИНИЦИАЛИЗАЦИЯ
+    recognition = initSpeechRecognition();
 
     // СОБЫТИЯ
     startBtn.addEventListener('click', startGame);
@@ -337,10 +483,15 @@
     restartBtn.addEventListener('click', resetGame);
     playAgain.addEventListener('click', resetGame);
     
-    // Отправка по Ctrl+Enter
+    micBtn.addEventListener('click', () => {
+      isListening ? stopListening() : startListening();
+    });
+    
     recallInput.addEventListener('keydown', e => {
       if (e.ctrlKey && e.key === 'Enter') checkAnswer();
     });
+
+    window.addEventListener('beforeunload', stopListening);
   </script>
 </body>
 </html>
